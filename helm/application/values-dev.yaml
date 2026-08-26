@@ -1,0 +1,52 @@
+# GKE dev overlay.
+#
+# Layered on top of values.yaml:
+#   helm upgrade --install orders-api ./helm/application \
+#     -f helm/application/values.yaml \
+#     -f helm/application/values-dev.yaml \
+#     --set image.repository=us-central1-docker.pkg.dev/PROJECT/orders/orders-api \
+#     --set image.tag=2.4.17
+#
+# Fill the two placeholders below from `terraform output` after apply.
+
+image:
+  # terraform output image_repository_url  -> append /orders-api
+  repository: "REGION-docker.pkg.dev/PROJECT_ID/orders/orders-api"
+  tag: "2.4.17"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  # terraform output workload_service_account_email
+  # Both this and the Terraform IAM binding must reference the same namespace
+  # and KSA name, or Workload Identity silently 403s.
+  gcpServiceAccount: "orders-api-dev-app-sa@PROJECT_ID.iam.gserviceaccount.com"
+
+config:
+  ENVIRONMENT: "dev"
+  LOG_LEVEL: "INFO"
+
+secrets:
+  create: false
+  # Create it out of band, once, before the first deploy:
+  #   kubectl create secret generic orders-api-secrets -n orders \
+  #     --from-literal=ORDERS_DB_DSN='postgresql://user:pass@host:5432/orders'
+  # Better still: Secret Manager + the CSI driver. See SECURITY.md.
+  existingSecret: "orders-api-secrets"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+
+# Left off: a GKE Ingress costs ~$18/month billed at zero traffic.
+ingress:
+  enabled: false
+
+monitoring:
+  # Requires enable_managed_prometheus = true in Terraform, which costs money
+  # beyond the free sample allowance.
+  podMonitoring:
+    enabled: false

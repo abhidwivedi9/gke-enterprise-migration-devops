@@ -1,0 +1,24 @@
+{
+  "displayName": "orders-api - replicas unavailable",
+  "documentation": {
+    "content": "FEWER PODS ARE SERVING THAN INTENDED.\n\nImpact: reduced capacity now, and a single further failure could take the service down entirely. At zero available replicas this is a full outage.\n\nFirst command:\n  ./scripts/verify-pods.sh -n orders\n\nInvestigation:\n  kubectl get pods -n orders -o wide\n  kubectl get endpoints orders-api -n orders     <-- zero endpoints = total outage\n  kubectl get events -n orders --sort-by=.lastTimestamp | tail -20\n\nCommon causes:\n  Pending           -> insufficient CPU/memory, taint mismatch  (TROUBLESHOOTING section 1)\n  Running but 0/1   -> readiness probe failing                  (TROUBLESHOOTING section 5)\n  CrashLoopBackOff  -> application fails at boot                (TROUBLESHOOTING section 3)\n\nIf this fired during a deploy, --atomic should have rolled back. Verify:\n  helm history orders-api -n orders",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "available replicas below desired for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"prometheus.googleapis.com/app_ready/gauge\" resource.type=\"prometheus_target\"",
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 2,
+        "duration": "300s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN", "crossSeriesReducer": "REDUCE_SUM" }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "CRITICAL",
+  "enabled": true
+}

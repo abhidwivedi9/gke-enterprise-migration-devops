@@ -1,0 +1,26 @@
+# Local validation cluster.
+#
+# Three nodes rather than one, deliberately: a single-node cluster cannot
+# demonstrate topology spread, PodDisruptionBudget-blocked drains, node
+# cordon/drain, or "Pending because no node has capacity". Those are four of
+# the fifteen failure-lab scenarios.
+#
+#   kind create cluster --name orders-lab --config kubernetes/kind-cluster.yaml
+#
+# Cost: $0. This runs entirely in Docker on your machine.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: orders-lab
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      # Let the control-plane node run workloads too, so a drain of one worker
+      # still has somewhere to reschedule on a small laptop.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+  - role: worker
+  - role: worker

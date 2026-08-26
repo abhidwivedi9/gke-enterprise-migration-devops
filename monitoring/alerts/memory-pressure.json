@@ -1,0 +1,25 @@
+{
+  "_comment": "Fires BEFORE the OOM kill. That is the entire value - alerting on an OOMKill that already happened tells you about an outage you did not prevent.",
+  "displayName": "orders-api - memory approaching limit",
+  "documentation": {
+    "content": "A CONTAINER IS NEAR ITS MEMORY LIMIT. AN OOMKILL IS COMING.\n\nMemory is INCOMPRESSIBLE. Unlike CPU, which throttles, exceeding the memory limit means the kernel kills the container instantly (exit 137) with no chance to log anything.\n\nFirst command:\n  kubectl top pods -n orders\n\nDecide which of two very different situations this is:\n\n  LIMIT TOO LOW - memory rises then plateaus (sawtooth). The app legitimately\n                  needs more. Raise the limit.\n  MEMORY LEAK   - memory climbs monotonically and never returns. Raising the\n                  limit only delays the crash. Fix the leak.\n\nThe shape of the memory graph over an hour distinguishes them.\n\nFix (limit too low):\n  helm upgrade orders-api ./helm/application ... --set resources.limits.memory=256Mi\n\nAlso check whether it is NODE memory pressure rather than the container limit:\n  kubectl describe node | grep MemoryPressure",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "memory above 85% of limit for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"kubernetes.io/container/memory/limit_utilization\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.85,
+        "duration": "300s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN", "crossSeriesReducer": "REDUCE_MAX", "groupByFields": ["resource.label.pod_name"] }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "WARNING",
+  "enabled": true
+}

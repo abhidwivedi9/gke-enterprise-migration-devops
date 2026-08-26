@@ -1,0 +1,255 @@
+name: Build and Test
+
+# Runs on every push and PR. No cloud credentials are needed and nothing is
+# pushed anywhere, so this workflow is safe to run on a fork.
+#
+# WHAT TO WATCH WHEN THIS RUNS:
+#   * lint failing on a line you did not touch  -> someone bypassed the hook
+#   * tests slower than usual                   -> a test gained a real network call
+#   * image size growing                        -> a dependency crept into runtime
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch. Saves CI minutes and stops an old
+# commit's job from finishing after a newer one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default. Jobs that need more must ask for it explicitly.
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint, test, security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r app/requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Unit tests
+        # These cover /version, /health and /ready deliberately: the endpoints
+        # production support depends on are the ones worth protecting from
+        # regression.
+        run: pytest -q
+
+      - name: Security scan - source (bandit)
+        # Fails only on MEDIUM and above. Low-severity findings are reported but
+        # do not block: a gate that cries wolf gets disabled within a month.
+        run: bandit -r app/src -ll
+
+      - name: Dependency vulnerability scan (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r app/requirements.txt || echo "::warning::pip-audit found advisories - review before release"
+
+  docker:
+    name: Build image and scan
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed so `git describe` and commit metadata are accurate.
+          fetch-depth: 0
+
+      - name: Derive build identity
+        id: identity
+        # Everything that ends up in /version is computed ONCE, here, and then
+        # baked into the image. This is what makes a running container traceable
+        # to an exact commit.
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # A tag push (v2.4.17) is a release; anything else is a dev build
+          # identified by commit SHA. Never "latest".
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: app/Dockerfile
+          push: false
+          load: true
+          tags: orders-api:${{ steps.identity.outputs.version }}
+          build-args: |
+            APP_VERSION=${{ steps.identity.outputs.version }}
+            GIT_COMMIT=${{ steps.identity.outputs.commit }}
+            GIT_BRANCH=${{ steps.identity.outputs.branch }}
+            BUILD_TIMESTAMP=${{ steps.identity.outputs.timestamp }}
+            IMAGE_TAG=${{ steps.identity.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify build identity landed in the image
+        # Catches a broken Dockerfile ARG/ENV chain HERE, in seconds, instead of
+        # during a production version check at 02:00.
+        run: |
+          set -euo pipefail
+          IMG="orders-api:${{ steps.identity.outputs.version }}"
+          BAKED=$(docker inspect "$IMG" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^APP_VERSION=' | cut -d= -f2)
+          echo "baked APP_VERSION: $BAKED"
+          [[ "$BAKED" == "${{ steps.identity.outputs.version }}" ]] || {
+            echo "::error::image reports '$BAKED', expected '${{ steps.identity.outputs.version }}'"; exit 1; }
+
+      - name: Verify the image does not run as root
+        run: |
+          set -euo pipefail
+          USER_ID=$(docker inspect "orders-api:${{ steps.identity.outputs.version }}" --format '{{.Config.User}}')
+          echo "image user: ${USER_ID:-<empty = root>}"
+          [[ -n "$USER_ID" && "$USER_ID" != "root" && "$USER_ID" != "0" ]] || {
+            echo "::error::image would run as root"; exit 1; }
+
+      - name: Smoke test the container
+        # Prove the thing actually serves before anyone tries to deploy it.
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8080:8080 \
+            -e ORDERS_DB_DSN='postgresql://ci:ci@localhost:5432/orders' \
+            "orders-api:${{ steps.identity.outputs.version }}"
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -sf http://localhost:8080/health | tee /dev/stderr
+          curl -sf http://localhost:8080/ready  | tee /dev/stderr
+          VERSION_JSON=$(curl -sf http://localhost:8080/version)
+          echo "$VERSION_JSON"
+          echo "$VERSION_JSON" | grep -q '"application_version":"${{ steps.identity.outputs.version }}"' || {
+            echo "::error::/version does not report the built version"; exit 1; }
+          docker rm -f smoke
+
+      - name: Image vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: orders-api:${{ steps.identity.outputs.version }}
+          format: table
+          # Fail the build on CRITICAL only. HIGH is reported but does not block,
+          # because base-image HIGHs with no available fix would otherwise block
+          # every release permanently and train people to ignore the gate.
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+  helm:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint (all value sets)
+        run: |
+          helm lint helm/application -f helm/application/values.yaml
+          helm lint helm/application -f helm/application/values.yaml -f helm/application/values-local.yaml
+          helm lint helm/application -f helm/application/values.yaml -f helm/application/values-dev.yaml
+
+      - name: helm template renders
+        run: |
+          helm template orders-api helm/application \
+            -f helm/application/values.yaml \
+            -f helm/application/values-local.yaml \
+            -n orders > /tmp/rendered.yaml
+          echo "rendered $(grep -c '^kind:' /tmp/rendered.yaml) resources"
+
+      - name: Guardrail - reject ':latest'
+        # The chart itself fails on latest, but asserting it in CI documents the
+        # rule and catches anyone who adds --set allowLatestTag=true.
+        run: |
+          if grep -E 'image:.*:latest' /tmp/rendered.yaml; then
+            echo "::error::a rendered manifest uses :latest"; exit 1
+          fi
+          echo "no :latest - ok"
+
+      - name: Guardrail - every container has resource limits
+        run: |
+          python - <<'PY'
+          import sys, yaml
+          missing = []
+          for doc in yaml.safe_load_all(open('/tmp/rendered.yaml')):
+              if not doc or doc.get('kind') != 'Deployment':
+                  continue
+              for c in doc['spec']['template']['spec']['containers']:
+                  lim = (c.get('resources') or {}).get('limits') or {}
+                  if 'memory' not in lim:
+                      missing.append(c['name'])
+          if missing:
+              print(f"::error::containers without a memory limit: {missing}")
+              sys.exit(1)
+          print("all containers have memory limits - ok")
+          PY
+
+      - name: Validate manifests against the Kubernetes schema
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas /tmp/rendered.yaml
+
+  terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive terraform/
+
+      - name: terraform validate
+        # -backend=false means no cloud credentials are required, so this runs
+        # on a PR from a fork. It validates syntax and provider schema, not
+        # whether the resources can actually be created.
+        run: |
+          cd terraform/environments/dev
+          terraform init -backend=false -input=false
+          terraform validate
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail on credential-shaped files
+        # Belt and braces alongside .gitignore. This repository is public; a
+        # single committed key is unrecoverable because forks and crawlers pick
+        # it up within minutes.
+        run: |
+          set -euo pipefail
+          BAD=$(git ls-files | grep -E '\.(pem|key|p12|pfx)$|service-account.*\.json$|^\.env$' || true)
+          if [[ -n "$BAD" ]]; then
+            echo "::error::credential-shaped files are tracked:"; echo "$BAD"; exit 1
+          fi
+          echo "no credential files tracked - ok"

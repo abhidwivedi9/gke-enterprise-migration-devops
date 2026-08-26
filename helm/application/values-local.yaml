@@ -1,0 +1,50 @@
+# Local kind overlay. No GCP dependency whatsoever, $0 cost.
+#
+# Load the image into kind first (kind nodes cannot see your local Docker
+# images otherwise - that is the single most common local ImagePullBackOff):
+#   kind load docker-image orders-api:2.4.17 --name orders-lab
+#
+#   helm upgrade --install orders-api ./helm/application \
+#     -f helm/application/values.yaml \
+#     -f helm/application/values-local.yaml \
+#     -n orders --create-namespace
+
+image:
+  repository: orders-api
+  tag: "2.4.17"
+  # Never pull: the image was side-loaded into the kind node. With IfNotPresent
+  # and no registry access this still works, but Never makes the intent explicit
+  # and fails loudly instead of hanging on a registry timeout.
+  pullPolicy: Never
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  gcpServiceAccount: "" # no Workload Identity off-GCP
+
+# Chart-managed Secret is acceptable here and ONLY here: this cluster is a
+# throwaway on your laptop, and the value is a dummy DSN.
+secrets:
+  create: true
+  existingSecret: ""
+  data:
+    ORDERS_DB_DSN: "postgresql://demo:demo@localhost:5432/orders"
+
+config:
+  ENVIRONMENT: "local"
+  LOG_LEVEL: "DEBUG"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+
+# A single-node kind cluster cannot satisfy a hostname spread constraint, so
+# ScheduleAnyway (already the default) matters here.
+topologySpreadConstraints:
+  enabled: true
+  whenUnsatisfiable: ScheduleAnyway
+
+ingress:
+  enabled: false

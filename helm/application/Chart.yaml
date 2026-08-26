@@ -1,0 +1,28 @@
+apiVersion: v2
+name: orders-api
+description: The enterprise orders API, migrated to GCP/GKE
+
+type: application
+
+# TWO different versions, and conflating them is a classic mistake:
+#
+#   version    - the CHART version. Bump when the templates change.
+#   appVersion - the APPLICATION version. Bump when the image changes.
+#
+# `helm list` shows both. During an incident, "which chart shipped which app
+# version" is the first question, and it is only answerable if these are
+# maintained honestly.
+version: 1.0.0
+appVersion: "2.4.17"
+
+keywords:
+  - orders
+  - migration
+  - gke
+
+maintainers:
+  - name: Platform Engineering
+
+annotations:
+  # Surfaced by `helm show chart` and by Argo CD / Rancher UIs.
+  category: Application

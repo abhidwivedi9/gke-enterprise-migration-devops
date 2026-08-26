@@ -1,0 +1,27 @@
+{{- if .Values.monitoring.podMonitoring.enabled -}}
+{{- /*
+  Google Cloud Managed Service for Prometheus.
+
+  Requires enable_managed_prometheus = true in Terraform. Without it the
+  PodMonitoring CRD does not exist and `helm install` fails with:
+    no matches for kind "PodMonitoring" in version "monitoring.googleapis.com/v1"
+
+  COSTS MONEY beyond the free sample allowance - see COST_CONTROL.md.
+*/ -}}
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: {{ include "orders-api.fullname" . }}
+  labels:
+    {{- include "orders-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "orders-api.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      # Longer interval = fewer samples = lower cost. 30s is plenty for
+      # dashboards; go to 15s only when chasing a fast-moving incident.
+      interval: {{ .Values.monitoring.podMonitoring.interval }}
+{{- end }}

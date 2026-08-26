@@ -1,0 +1,27 @@
+{
+  "_comment": "THE most important alert in this project. Pod-health alerting cannot detect a pod that is Ready and returns 500 to every request. Requires Managed Prometheus, or a log-based metric (see below).",
+  "displayName": "orders-api - high 5xx rate",
+  "documentation": {
+    "content": "MORE THAN 1% OF REQUESTS ARE FAILING.\n\nWhat this means: users are getting errors RIGHT NOW. Kubernetes may show every pod as healthy - that is exactly the scenario this alert exists for.\n\nFirst command:\n  ./scripts/health-check.sh -n orders\n\nInvestigation path: docs/INCIDENT_HTTP_500.md\n  1. Quantify - what %, since when, which endpoints?\n  2. Correlate with deploys: helm history orders-api -n orders\n  3. Is it ONE pod or ALL pods?\n       kubectl logs -n orders -l app.kubernetes.io/instance=orders-api --tail=1000 \\n         | jq -r 'select(.status>=500) | .pod' | sort | uniq -c\n  4. Check for a mixed fleet: ./scripts/verify-version.sh -n orders -r orders-api -v VERSION\n\nResolution: if it correlates with a recent deploy, ROLL BACK FIRST.\n  ./scripts/rollback.sh -n orders\nStopping user impact takes priority over root-causing.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "5xx rate > 1% for 2 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"prometheus.googleapis.com/http_requests_total/counter\" resource.type=\"prometheus_target\" metric.label.\"status\"=monitoring.regex.full_match(\"5..\")",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.01,
+        "duration": "120s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }
+        ],
+        "trigger": { "count": 1 }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "alertStrategy": { "autoClose": "1800s" },
+  "severity": "CRITICAL",
+  "enabled": true
+}

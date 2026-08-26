@@ -1,0 +1,17 @@
+.git
+.github
+docs
+terraform
+helm
+kubernetes
+monitoring
+scripts
+failure-lab
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+.venv
+*.md
+.env
+*.tfstate*

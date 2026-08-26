@@ -1,0 +1,43 @@
+{{- if .Values.ingress.enabled -}}
+{{- /*
+  COSTS MONEY ON GKE.
+
+  A GCE Ingress provisions a Google Cloud HTTP(S) Load Balancer. The forwarding
+  rule alone is roughly $18/month and is billed whether or not a single request
+  arrives. It is disabled by default for exactly that reason.
+
+  For validating a deployment, `kubectl port-forward` proves the same thing at
+  zero cost. Enable this only when you need a real public endpoint.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "orders-api.fullname" . }}
+  labels:
+    {{- include "orders-api.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "orders-api.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

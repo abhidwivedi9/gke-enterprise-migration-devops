@@ -1,0 +1,24 @@
+# Normalise to LF in the repository.
+#
+# Without this, a Windows checkout writes CRLF, and a shell script with CRLF
+# line endings fails on Linux with the famously unhelpful:
+#     /usr/bin/env: 'bash\r': No such file or directory
+# Every one of these files is executed inside a Linux container or on a Linux
+# CI runner, so LF is not a preference here - it is a correctness requirement.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.py      text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.tf      text eol=lf
+*.tpl     text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+Dockerfile text eol=lf
+.gitignore text eol=lf
+
+# Never mangle binaries
+*.png     binary
+*.jpg     binary
+*.gz      binary

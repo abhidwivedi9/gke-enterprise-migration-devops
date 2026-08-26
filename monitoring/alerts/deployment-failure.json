@@ -1,0 +1,25 @@
+{
+  "_comment": "Log-based alert. Does NOT require Managed Prometheus - it reads Kubernetes events, which are exported to Cloud Logging for free. Create the log-based metric first (see monitoring/README.md).",
+  "displayName": "orders-api - deployment failing",
+  "documentation": {
+    "content": "A DEPLOYMENT IS NOT PROGRESSING.\n\nThis fires on Kubernetes events indicating pods cannot start: FailedScheduling, ImagePullBackOff, CrashLoopBackOff, FailedCreate.\n\nFirst command:\n  kubectl get events -n orders --sort-by=.lastTimestamp | tail -20\n\nThen match the reason:\n  FailedScheduling    -> no node has capacity, or taint/affinity mismatch  (TROUBLESHOOTING 1)\n  ImagePullBackOff    -> tag missing, IAM, wrong registry path             (TROUBLESHOOTING 2)\n  CrashLoopBackOff    -> app exits at boot; kubectl logs POD --previous    (TROUBLESHOOTING 3)\n  FailedCreate        -> quota, or a missing ConfigMap/Secret              (TROUBLESHOOTING 8)\n\nIf this fired during a pipeline deploy, --atomic should have rolled back\nautomatically. Confirm rather than assume:\n  helm history orders-api -n orders\n\nIf --atomic did NOT roll back, the release is stuck. Roll back manually:\n  ./scripts/rollback.sh -n orders",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "pod failure events in the last 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/k8s_pod_failure_events\" resource.type=\"k8s_container\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "300s",
+        "aggregations": [
+          { "alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM" }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "WARNING",
+  "enabled": true
+}

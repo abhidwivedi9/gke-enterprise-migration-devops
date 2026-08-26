@@ -1,0 +1,273 @@
+name: Deploy to GKE (dev)
+
+# THE DEPLOYMENT PIPELINE.
+#
+#   Checkout -> Auth (OIDC) -> Build -> Scan -> Push -> Deploy -> Smoke test
+#   -> Version verification -> Deployment validation
+#
+# It authenticates with Workload Identity Federation. There is NO service-account
+# JSON key anywhere in this repository or in GitHub secrets - see SECURITY.md.
+#
+# ============================ WHAT TO WATCH ============================
+# When you run this pipeline, watch these four things in this order. They are
+# the four places a deploy silently goes wrong:
+#
+#   1. "Authenticate to Google Cloud" - a failure here is almost always the
+#      WIF attribute_condition not matching your repo, or the job missing
+#      `permissions: id-token: write`.
+#   2. "Push image" - confirm the digest printed here. It is the artifact
+#      identity that everything downstream must match.
+#   3. "Verify deployed version" - THE gate. It compares the digest running in
+#      the cluster against the digest just pushed. A pipeline that skips this
+#      can report SUCCESS while serving last week's code.
+#   4. "Post-deployment validation" - smoke tests against BUSINESS endpoints,
+#      not just /health. Probes can be green while every real request 500s.
+# =======================================================================
+
+on:
+  push:
+    tags: ['v*']            # releases: v2.4.17
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (e.g. 2.4.17)'
+        required: true
+      skip_build:
+        description: 'Deploy an already-published image without rebuilding'
+        type: boolean
+        default: false
+
+concurrency:
+  # NEVER cancel a deploy in progress. Cancelling mid-rollout leaves the cluster
+  # in a half-updated state that nobody has a mental model of.
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write        # REQUIRED for OIDC. Without it, auth fails with a
+                         # confusing "unable to get credentials" error.
+
+env:
+  GCP_REGION: us-central1
+  GCP_ZONE: us-central1-a
+  CLUSTER_NAME: orders-api-dev-gke
+  NAMESPACE: orders
+  RELEASE: orders-api
+  REPOSITORY: orders
+  IMAGE_NAME: orders-api
+
+jobs:
+  deploy:
+    name: Build, push and deploy
+    runs-on: ubuntu-latest
+    environment: dev       # attach required reviewers here for a prod gate
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          [[ -n "$VERSION" ]] || { echo "::error::no version resolved"; exit 1; }
+          [[ "$VERSION" != "latest" ]] || { echo "::error::refusing to deploy 'latest'"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "Deploying version $VERSION from $(git rev-parse --short HEAD)"
+
+      # -------------------------------------------------------------------
+      # KEYLESS AUTHENTICATION.
+      #
+      # GitHub mints a short-lived OIDC token describing this exact repo, ref
+      # and workflow. GCP validates it against the provider's attribute
+      # condition and exchanges it for a ~1 hour access token.
+      #
+      # Neither secret below is a credential: the provider is a resource path
+      # and the service account is an email address. They are stored as secrets
+      # only to keep the project ID out of a public repo.
+      # -------------------------------------------------------------------
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Compute image path
+        id: img
+        run: |
+          BASE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "full=${BASE}:${{ steps.v.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # BUILD + PUSH
+      # -------------------------------------------------------------------
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ !inputs.skip_build }}
+
+      - name: Build and push image
+        if: ${{ !inputs.skip_build }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: app/Dockerfile
+          push: true
+          tags: ${{ steps.img.outputs.full }}
+          build-args: |
+            APP_VERSION=${{ steps.v.outputs.version }}
+            GIT_COMMIT=${{ steps.v.outputs.commit }}
+            GIT_BRANCH=${{ github.ref_name }}
+            BUILD_TIMESTAMP=${{ steps.v.outputs.timestamp }}
+            IMAGE_TAG=${{ steps.v.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan the pushed image
+        if: ${{ !inputs.skip_build }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.img.outputs.full }}
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      # -------------------------------------------------------------------
+      # RESOLVE THE DIGEST.
+      #
+      # From here on the pipeline reasons about the DIGEST, not the tag. This is
+      # what makes "the pipeline said success but the old code is running"
+      # impossible: a digest cannot be repointed.
+      # -------------------------------------------------------------------
+      - name: Resolve image digest
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${{ steps.img.outputs.full }}" --format='value(image_summary.digest)')
+          [[ -n "$DIGEST" ]] || { echo "::error::could not resolve digest - was the push successful?"; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "### Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag: \`${{ steps.img.outputs.full }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- digest: \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # -------------------------------------------------------------------
+      # DEPLOY
+      # -------------------------------------------------------------------
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location: ${{ env.GCP_ZONE }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Record the rollback target BEFORE deploying
+        id: prev
+        # Captured now so it is in the log at the top of the incident, not
+        # something you go hunting for under pressure.
+        run: |
+          REV=$(helm list -n ${{ env.NAMESPACE }} -f "^${{ env.RELEASE }}$" -o json 2>/dev/null \
+            | grep -o '"revision":"\?[0-9]*"\?' | head -1 | tr -dc '0-9' || echo "")
+          echo "revision=${REV}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$REV" ]]; then
+            echo "::notice::Rollback target if this fails: helm rollback ${{ env.RELEASE }} $REV -n ${{ env.NAMESPACE }}"
+          fi
+
+      - name: Deploy with Helm
+        run: |
+          set -euo pipefail
+          helm upgrade --install ${{ env.RELEASE }} ./helm/application \
+            -f helm/application/values.yaml \
+            -f helm/application/values-dev.yaml \
+            -n ${{ env.NAMESPACE }} --create-namespace \
+            --set image.repository=${{ steps.img.outputs.base }} \
+            --set image.tag=${{ steps.v.outputs.version }} \
+            --set image.digest=${{ steps.digest.outputs.digest }} \
+            --set serviceAccount.gcpServiceAccount=${{ secrets.GCP_WORKLOAD_SA }} \
+            --wait --atomic --timeout 10m
+          # --wait   : block until pods are actually Ready
+          # --atomic : auto-rollback if they are not. Without these two flags,
+          #            `helm upgrade` returns 0 the moment the API accepts YAML.
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/${{ env.RELEASE }} -n ${{ env.NAMESPACE }} --timeout=5m
+
+      # -------------------------------------------------------------------
+      # VERIFY. The gate that makes SUCCESS mean something.
+      # -------------------------------------------------------------------
+      - name: Verify deployed version
+        run: |
+          chmod +x scripts/verify-version.sh
+          ./scripts/verify-version.sh \
+            -n ${{ env.NAMESPACE }} \
+            -r ${{ env.RELEASE }} \
+            -v ${{ steps.v.outputs.version }} \
+            --registry ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}
+
+      - name: Smoke test business endpoints
+        # /health returning 200 proves the process is alive. It does not prove
+        # the API works. Test what users actually call.
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n ${{ env.NAMESPACE }} svc/${{ env.RELEASE }} 8080:80 &
+          sleep 5
+          curl -sf http://localhost:8080/health  >/dev/null && echo "health ok"
+          curl -sf http://localhost:8080/ready   >/dev/null && echo "ready ok"
+          curl -sf http://localhost:8080/api/orders | tee /dev/stderr | grep -q '"orders"' \
+            || { echo "::error::/api/orders did not return an orders payload"; exit 1; }
+
+          FAILED=0
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/orders)
+            [[ "$code" == "200" ]] || FAILED=$((FAILED+1))
+          done
+          echo "failed: $FAILED/20"
+          [[ "$FAILED" -eq 0 ]] || { echo "::error::$FAILED/20 requests failed - do not call this deploy successful"; exit 1; }
+
+      - name: Post-deployment validation
+        run: |
+          chmod +x scripts/migration-validation.sh
+          ./scripts/migration-validation.sh -n ${{ env.NAMESPACE }} -v ${{ steps.v.outputs.version }} \
+            --gcp --project ${{ secrets.GCP_PROJECT_ID }} \
+            --cluster ${{ env.CLUSTER_NAME }} --zone ${{ env.GCP_ZONE }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Deployment ${{ job.status }}"
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| version | ${{ steps.v.outputs.version }} |"
+            echo "| commit | \`${{ steps.v.outputs.commit }}\` |"
+            echo "| digest | \`${{ steps.digest.outputs.digest }}\` |"
+            echo "| cluster | ${{ env.CLUSTER_NAME }} |"
+            echo "| namespace | ${{ env.NAMESPACE }} |"
+            echo "| rollback to | revision ${{ steps.prev.outputs.revision }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: On failure - collect evidence
+        if: failure()
+        # Runs BEFORE anyone starts fixing, because fixing destroys evidence.
+        run: |
+          echo "### Failure diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide || true
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -30 || true
+          kubectl describe pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/instance=${{ env.RELEASE }} | tail -60 || true
+          kubectl logs -n ${{ env.NAMESPACE }} -l app.kubernetes.io/instance=${{ env.RELEASE }} --tail=100 --previous || true
+          helm history ${{ env.RELEASE }} -n ${{ env.NAMESPACE }} || true
+          echo "::notice::--atomic should have rolled back automatically. Confirm with helm history."

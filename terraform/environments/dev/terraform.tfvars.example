@@ -1,0 +1,39 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# DUMMY VALUES ONLY in this file. Never put a credential in a .tfvars file at
+# all - Terraform variables are not a secret store. Use Secret Manager or
+# environment variables sourced from one.
+
+project_id = "my-gcp-project-id"
+
+region = "us-central1"
+zone   = "us-central1-a"
+
+environment = "dev"
+
+# Pin the Kubernetes API to your own IP. Find it with: curl -s ifconfig.me
+# Leaving this empty leaves the API endpoint reachable from the whole internet
+# (still authenticated, but exposed to scanning).
+authorized_networks = [
+  # { cidr_block = "203.0.113.42/32", display_name = "my-laptop" },
+]
+
+# owner/repo of YOUR fork. If this is wrong, the OIDC trust condition is wrong
+# and either CI cannot authenticate or the wrong repo can.
+github_repository = "your-github-username/gke-enterprise-migration-devops"
+
+# ---------------------------------------------------------------------------
+# Cost flags. Each of these costs money. Leave false unless you have read
+# COST_CONTROL.md and accepted the charge.
+# ---------------------------------------------------------------------------
+enable_cloud_nat           = false
+enable_flow_logs           = false
+enable_http_load_balancing = false
+enable_managed_prometheus  = false
+
+# Compute sizing - the main lever on the bill.
+machine_type   = "e2-small"
+use_spot_vms   = true
+min_node_count = 1
+max_node_count = 3

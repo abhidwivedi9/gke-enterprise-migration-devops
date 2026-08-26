@@ -1,0 +1,24 @@
+{
+  "displayName": "orders-api - high p95 latency",
+  "documentation": {
+    "content": "REQUESTS ARE SLOW.\n\nWhy p95 and not average: an average hides the tail. If 90% of requests take 10ms and 10% take 5s, the average looks fine and one user in ten is having a terrible time.\n\nFirst command:\n  kubectl top pods -n orders\n\nInvestigation:\n  1. CPU near the limit? -> the container is being THROTTLED. CPU is compressible:\n     it does not kill the container, it just makes everything slow until upstream\n     timeouts convert slowness into 5xx.\n  2. Is a dependency slow?\n       kubectl logs -n orders -l app.kubernetes.io/instance=orders-api \\n         | jq -c 'select(.latency_ms > 1000)'\n  3. Did latency change at a deploy?  helm history orders-api -n orders\n  4. Is the HPA scaling?  kubectl get hpa -n orders\n\nA new version that is 3x slower is a FAILED deploy even if it returns 200.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "p95 latency above 1s for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"prometheus.googleapis.com/http_request_duration_seconds/histogram\" resource.type=\"prometheus_target\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 1.0,
+        "duration": "300s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_PERCENTILE_95" }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "WARNING",
+  "enabled": true
+}

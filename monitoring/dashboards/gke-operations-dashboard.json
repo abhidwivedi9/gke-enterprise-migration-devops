@@ -1,0 +1,469 @@
+{
+  "_comment": "GKE DevOps Operations Dashboard for orders-api. Import with: gcloud monitoring dashboards create --config-from-file=gke-operations-dashboard.json --project PROJECT_ID. NOT YET VALIDATED against a live GCP project - see VALIDATION_REPORT.md. Panels marked requiresManagedPrometheus need enable_managed_prometheus=true in Terraform, which incurs cost beyond the free sample allowance.",
+  "displayName": "orders-api — GKE Operations",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 0,
+        "widget": {
+          "title": "CLUSTER HEALTH",
+          "text": {
+            "content": "Node capacity and availability. If anything here is red, application panels below are unreliable — a NotReady node silently removes capacity and the pods on it are stale.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 3,
+        "height": 3,
+        "xPos": 0,
+        "yPos": 1,
+        "widget": {
+          "title": "Nodes Ready",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "metric.type=\"kubernetes.io/node/status/condition\" resource.type=\"k8s_node\" metric.label.\"condition\"=\"Ready\" metric.label.\"status\"=\"true\"",
+                "aggregation": {
+                  "alignmentPeriod": "60s",
+                  "perSeriesAligner": "ALIGN_MEAN",
+                  "crossSeriesReducer": "REDUCE_COUNT"
+                }
+              }
+            },
+            "sparkChartView": { "sparkChartType": "SPARK_LINE" }
+          }
+        }
+      },
+      {
+        "width": 3,
+        "height": 3,
+        "xPos": 3,
+        "yPos": 1,
+        "widget": {
+          "title": "Node CPU utilisation",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/node/cpu/allocatable_utilization\" resource.type=\"k8s_node\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["resource.label.\"node_name\""]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.label.node_name}"
+              }
+            ],
+            "yAxis": { "label": "utilisation", "scale": "LINEAR" },
+            "thresholds": [{ "value": 0.8, "color": "YELLOW" }, { "value": 0.9, "color": "RED" }]
+          }
+        }
+      },
+      {
+        "width": 3,
+        "height": 3,
+        "xPos": 6,
+        "yPos": 1,
+        "widget": {
+          "title": "Node memory utilisation",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/node/memory/allocatable_utilization\" resource.type=\"k8s_node\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["resource.label.\"node_name\""]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.label.node_name}"
+              }
+            ],
+            "yAxis": { "label": "utilisation", "scale": "LINEAR" },
+            "thresholds": [{ "value": 0.85, "color": "RED" }]
+          }
+        }
+      },
+      {
+        "width": 3,
+        "height": 3,
+        "xPos": 9,
+        "yPos": 1,
+        "widget": {
+          "title": "Nodes NOT Ready",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "metric.type=\"kubernetes.io/node/status/condition\" resource.type=\"k8s_node\" metric.label.\"condition\"=\"Ready\" metric.label.\"status\"=\"false\"",
+                "aggregation": {
+                  "alignmentPeriod": "60s",
+                  "perSeriesAligner": "ALIGN_MEAN",
+                  "crossSeriesReducer": "REDUCE_COUNT"
+                }
+              }
+            },
+            "thresholds": [{ "value": 1, "color": "RED", "direction": "ABOVE" }]
+          }
+        }
+      },
+
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 4,
+        "widget": {
+          "title": "APPLICATION HEALTH",
+          "text": {
+            "content": "Do we have the capacity we think we have? `available` below `desired` means degraded capacity even if nothing is alerting.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 3,
+        "xPos": 0,
+        "yPos": 5,
+        "widget": {
+          "title": "Replicas: desired vs available",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/pod/volume/utilization\" resource.type=\"k8s_pod\" resource.label.\"namespace_name\"=\"orders\"",
+                    "aggregation": { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN" }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "replicas"
+              }
+            ],
+            "yAxis": { "label": "count", "scale": "LINEAR" }
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 3,
+        "xPos": 4,
+        "yPos": 5,
+        "widget": {
+          "title": "Container restarts (rate)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/container/restart_count\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["resource.label.\"pod_name\""]
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "${resource.label.pod_name}"
+              }
+            ],
+            "yAxis": { "label": "restarts / 5 min", "scale": "LINEAR" }
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 3,
+        "xPos": 8,
+        "yPos": 5,
+        "widget": {
+          "title": "Pods by phase",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/container/uptime\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_COUNT"
+                    }
+                  }
+                },
+                "plotType": "STACKED_AREA",
+                "legendTemplate": "running containers"
+              }
+            ],
+            "yAxis": { "label": "count", "scale": "LINEAR" }
+          }
+        }
+      },
+
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 8,
+        "widget": {
+          "title": "APPLICATION PERFORMANCE  —  requires Managed Prometheus",
+          "text": {
+            "content": "**These panels are the ones that catch the incidents pod health cannot see.** A pod can be Ready and return 500 to every request. Requires `enable_managed_prometheus = true` in Terraform and `monitoring.podMonitoring.enabled = true` in Helm — both cost money beyond the free sample allowance.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 4,
+        "xPos": 0,
+        "yPos": 9,
+        "widget": {
+          "title": "Request rate by status",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (status) (rate(http_requests_total{namespace=\"orders\"}[5m]))"
+                },
+                "plotType": "STACKED_AREA",
+                "legendTemplate": "${status}"
+              }
+            ],
+            "yAxis": { "label": "req/s", "scale": "LINEAR" }
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 4,
+        "xPos": 4,
+        "yPos": 9,
+        "widget": {
+          "title": "5xx error rate (%)  ← THE panel",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * sum(rate(http_requests_total{namespace=\"orders\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{namespace=\"orders\"}[5m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "5xx %"
+              }
+            ],
+            "yAxis": { "label": "percent", "scale": "LINEAR" },
+            "thresholds": [{ "value": 1, "color": "YELLOW" }, { "value": 5, "color": "RED" }]
+          }
+        }
+      },
+      {
+        "width": 4,
+        "height": 4,
+        "xPos": 8,
+        "yPos": 9,
+        "widget": {
+          "title": "Latency p50 / p95 / p99",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=\"orders\"}[5m])))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "p50"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=\"orders\"}[5m])))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "p95"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=\"orders\"}[5m])))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "p99"
+              }
+            ],
+            "yAxis": { "label": "seconds", "scale": "LINEAR" },
+            "thresholds": [{ "value": 0.5, "color": "YELLOW" }, { "value": 1.0, "color": "RED" }]
+          }
+        }
+      },
+
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 13,
+        "widget": {
+          "title": "DEPLOYMENT & VERSION",
+          "text": {
+            "content": "**More than one version on this panel means a mixed fleet** — some requests hit new code, some hit old. That is what 'intermittent' bugs usually are.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 6,
+        "height": 3,
+        "xPos": 0,
+        "yPos": 14,
+        "widget": {
+          "title": "Running versions (should be exactly one)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "count by (version) (app_build_info{namespace=\"orders\"})"
+                },
+                "plotType": "STACKED_AREA",
+                "legendTemplate": "${version}"
+              }
+            ],
+            "yAxis": { "label": "pods", "scale": "LINEAR" }
+          }
+        }
+      },
+      {
+        "width": 6,
+        "height": 3,
+        "xPos": 6,
+        "yPos": 14,
+        "widget": {
+          "title": "Pods ready (app_ready)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": { "prometheusQuery": "sum(app_ready{namespace=\"orders\"})" },
+                "plotType": "LINE",
+                "legendTemplate": "ready pods"
+              }
+            ],
+            "yAxis": { "label": "count", "scale": "LINEAR" }
+          }
+        }
+      },
+
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 17,
+        "widget": {
+          "title": "AUTOSCALING & RESOURCES",
+          "text": {
+            "content": "CPU utilisation here is against the **request**, which is what the HPA scales on. Memory approaching the limit predicts an OOMKill.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 6,
+        "height": 3,
+        "xPos": 0,
+        "yPos": 18,
+        "widget": {
+          "title": "CPU: usage vs request",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/container/cpu/request_utilization\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["resource.label.\"pod_name\""]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.label.pod_name}"
+              }
+            ],
+            "yAxis": { "label": "× request", "scale": "LINEAR" },
+            "thresholds": [{ "value": 0.7, "color": "YELLOW" }]
+          }
+        }
+      },
+      {
+        "width": 6,
+        "height": 3,
+        "xPos": 6,
+        "yPos": 18,
+        "widget": {
+          "title": "Memory: usage vs limit  (OOM predictor)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"kubernetes.io/container/memory/limit_utilization\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["resource.label.\"pod_name\""]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.label.pod_name}"
+              }
+            ],
+            "yAxis": { "label": "× limit", "scale": "LINEAR" },
+            "thresholds": [{ "value": 0.85, "color": "YELLOW" }, { "value": 0.95, "color": "RED" }]
+          }
+        }
+      },
+
+      {
+        "width": 12,
+        "height": 1,
+        "xPos": 0,
+        "yPos": 21,
+        "widget": {
+          "title": "OPERATIONAL — RECENT ERRORS",
+          "text": {
+            "content": "Live error stream. Use the `request_id` field to follow one user's request end to end. See docs/LOGGING_GUIDE.md.",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "width": 12,
+        "height": 4,
+        "xPos": 0,
+        "yPos": 22,
+        "widget": {
+          "title": "Recent application errors",
+          "logsPanel": {
+            "filter": "resource.type=\"k8s_container\"\nresource.labels.namespace_name=\"orders\"\nresource.labels.container_name=\"orders-api\"\nseverity>=ERROR",
+            "resourceNames": []
+          }
+        }
+      }
+    ]
+  }
+}

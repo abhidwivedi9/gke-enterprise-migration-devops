@@ -1,0 +1,340 @@
+# Default values for orders-api.
+#
+# These are the SAFE, PORTABLE defaults. They run on a local kind cluster with
+# no GCP dependency at all. Environment overlays (values-dev.yaml,
+# values-prod.yaml) layer GKE-specific settings on top.
+#
+# Every non-obvious setting carries the reason it has that value. If you change
+# one without understanding the reason, you will find out during an incident.
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+image:
+  repository: orders-api
+
+  # NEVER "latest" in any environment you care about.
+  #
+  # "latest" is a mutable pointer. Two pods created 10 minutes apart can run
+  # different code with identical spec. Rollback becomes impossible because
+  # there is no previous tag to roll back to. Immutable version tags, or a
+  # digest, are the only correct answers.
+  tag: "2.4.17"
+
+  # Optionally pin the exact digest. When set, this WINS over the tag and the
+  # deployment becomes byte-for-byte deterministic - the strongest guarantee
+  # available that the code you tested is the code that runs.
+  #   digest: "sha256:abc123..."
+  digest: ""
+
+  # IfNotPresent: use the cached layer if the node already has this tag.
+  # Correct ONLY because our tags are immutable. With mutable tags you would
+  # need Always, and you would pay a registry round-trip on every pod start.
+  pullPolicy: IfNotPresent
+
+  # Only needed for a private registry that is not Artifact Registry. On GKE,
+  # Artifact Registry access comes from the node service account instead - no
+  # imagePullSecret required, which is one fewer secret to leak.
+  pullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Replicas
+# ---------------------------------------------------------------------------
+# 2 is the minimum that survives a single node failure or a voluntary eviction
+# without a total outage. 1 replica means every node drain is an outage.
+# Ignored entirely when autoscaling.enabled is true.
+replicaCount: 2
+
+# ---------------------------------------------------------------------------
+# Deployment strategy
+# ---------------------------------------------------------------------------
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    # maxUnavailable: 0 - never drop below the desired replica count during a
+    # rollout. Capacity is preserved throughout, so a deploy under load does
+    # not shed traffic.
+    maxUnavailable: 0
+    # maxSurge: 1 - add at most one extra pod at a time. Higher is faster but
+    # needs more spare cluster capacity; on a 1-node lab cluster a large surge
+    # will simply leave pods Pending.
+    maxSurge: 1
+
+# How long Kubernetes waits between SIGTERM and SIGKILL.
+#
+# Must exceed: preStop sleep + the app's own drain time + longest in-flight
+# request. Ours is 5s drain + 5s preStop, so 30s is comfortable. Too short and
+# you kill in-flight requests, which users experience as random 502s during
+# every deploy.
+terminationGracePeriodSeconds: 30
+
+# ---------------------------------------------------------------------------
+# Probes
+#
+# The three probes answer three DIFFERENT questions. Using the same endpoint
+# and thresholds for all three is the most common probe mistake there is.
+# ---------------------------------------------------------------------------
+probes:
+  # STARTUP: "has it finished booting?"
+  # While this is failing, liveness and readiness are suspended entirely. This
+  # is what lets a slow-starting app (JVM warmup, cache preload) live alongside
+  # an aggressive liveness probe. failureThreshold x periodSeconds = the total
+  # boot budget: 30 x 2s = 60 seconds here.
+  startup:
+    enabled: true
+    path: /startup
+    periodSeconds: 2
+    failureThreshold: 30
+    timeoutSeconds: 2
+
+  # LIVENESS: "should kubelet restart this container?"
+  # Deliberately forgiving. A liveness probe that is too aggressive turns a slow
+  # dependency into a restart storm - the container gets killed mid-recovery,
+  # over and over. failureThreshold 3 x 10s = 30 seconds of sustained failure
+  # before a restart.
+  liveness:
+    enabled: true
+    path: /health
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 3
+    initialDelaySeconds: 0 # not needed: the startup probe covers boot
+
+  # READINESS: "send traffic here right now?"
+  # Deliberately twitchy, because failing it is cheap - the pod is removed from
+  # Endpoints, not killed. failureThreshold 2 x 5s = out of rotation within 10s.
+  readiness:
+    enabled: true
+    path: /ready
+    periodSeconds: 5
+    failureThreshold: 2
+    successThreshold: 1
+    timeoutSeconds: 3
+
+# ---------------------------------------------------------------------------
+# Resources
+#
+# requests  = what the SCHEDULER reserves. Determines which node the pod fits
+#             on, and the guaranteed floor under contention.
+# limits    = the hard ceiling. Exceed the memory limit and the kernel OOM-kills
+#             the container (exit 137). Exceed the CPU limit and it is throttled,
+#             not killed - CPU is compressible, memory is not.
+#
+# CPU limit is deliberately generous relative to the request: throttling a
+# latency-sensitive API to save CPU you are not being charged for is a bad
+# trade. Memory request == limit gives the pod Guaranteed QoS, so it is the
+# LAST thing evicted when a node comes under memory pressure.
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Autoscaling (HPA)
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5 # a hard ceiling on how much this workload can cost you
+
+  # Target 70% of the CPU REQUEST (50m), i.e. scale up past ~35m average.
+  # HPA maths: desired = ceil(current * (currentUtil / targetUtil)).
+  #
+  # HPA cannot compute utilisation at all if resources.requests.cpu is unset -
+  # that is the single most common "why is my HPA showing <unknown>/70%" cause,
+  # after metrics-server simply not being installed.
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 0 # 0 = disabled
+
+  # Scaling behaviour. Without this, HPA uses defaults that scale down after a
+  # 5-minute stabilisation window - usually fine, occasionally a source of
+  # flapping under spiky traffic.
+  behavior:
+    scaleDown:
+      # Wait 5 minutes of sustained low load before removing pods, so a brief
+      # traffic dip does not trigger a scale-down you immediately undo.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+    scaleUp:
+      # React to load quickly. Scaling up late costs you an SLO; scaling up
+      # early costs you pennies.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget
+#
+# Governs VOLUNTARY disruptions only - node drains, cluster upgrades, autoscaler
+# scale-down. It does NOT protect against a node hard-failing.
+#
+# minAvailable: 1 with 2 replicas means a drain may evict one pod at a time.
+# CAUTION: setting minAvailable equal to replicaCount blocks node drains
+# forever, which stalls cluster upgrades. That is failure-lab scenario 11.
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  # ClusterIP, deliberately. A LoadBalancer Service provisions a real Google
+  # Cloud load balancer at ~$18/month billed even at zero traffic. For
+  # validation, `kubectl port-forward` costs nothing and proves the same thing.
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Ingress - COSTS MONEY on GKE. Default off.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: gce
+  annotations: {}
+  hosts:
+    - host: orders.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---------------------------------------------------------------------------
+# ServiceAccount + Workload Identity
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: "" # defaults to the fullname
+
+  # The GKE half of the Workload Identity binding. The other half is the IAM
+  # policy in terraform/modules/iam. BOTH are required. Leave empty off-GCP.
+  gcpServiceAccount: ""
+
+  annotations: {}
+
+  # Don't mount the KSA token unless the pod actually calls the Kubernetes API.
+  # Most application pods never do, and an unused token is a credential sitting
+  # in the container filesystem waiting to be exfiltrated.
+  automountServiceAccountToken: false
+
+# ---------------------------------------------------------------------------
+# Security context
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001 # MUST match the UID created in app/Dockerfile
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault # blocks ~300 rarely-needed syscalls
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false # blocks setuid binaries gaining more privilege
+  readOnlyRootFilesystem: true # the app writes nothing to disk; see volumes below
+  runAsNonRoot: true
+  runAsUser: 10001
+  capabilities:
+    drop:
+      - ALL # a web server needs none of the 14 default Linux capabilities
+
+# ---------------------------------------------------------------------------
+# Application configuration -> ConfigMap
+#
+# Non-secret only. Anything sensitive goes through the secret block below.
+# ---------------------------------------------------------------------------
+config:
+  ENVIRONMENT: "dev"
+  LOG_LEVEL: "INFO"
+  SHUTDOWN_DRAIN_SECONDS: "5"
+
+# ---------------------------------------------------------------------------
+# Secrets
+#
+# Three strategies, in increasing order of correctness:
+#
+#   1. create: true          - chart-managed Secret from values. Convenient,
+#                              but the value lands in your values file and in
+#                              Helm release history. NEVER for production.
+#   2. existingSecret        - you create the Secret out of band. The chart only
+#                              references it. Good.
+#   3. Secret Manager + CSI  - the value never becomes a Kubernetes Secret at
+#      driver / External      all; it is projected into the pod at runtime and
+#      Secrets Operator       rotates centrally. Best. See SECURITY.md.
+#
+# Default here is (2) with a placeholder, because it is what a real migration
+# uses on day one.
+# ---------------------------------------------------------------------------
+secrets:
+  create: false
+  existingSecret: "orders-api-secrets"
+
+  # Keys expected inside that Secret. Referenced via envFrom, so all keys in
+  # the Secret become environment variables.
+  #   ORDERS_DB_DSN - the app refuses to start without it (deliberate: fail
+  #                   loudly on missing config rather than serve wrong data)
+  requiredKeys:
+    - ORDERS_DB_DSN
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+# Spread replicas across nodes so one node failure cannot take out every pod.
+# ScheduleAnyway (not DoNotSchedule) because on a single-node lab cluster
+# DoNotSchedule would leave every replica after the first stuck Pending.
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+monitoring:
+  # PodMonitoring is the Google Managed Prometheus CRD. Only install it when
+  # enable_managed_prometheus = true in Terraform, or the CRD will not exist
+  # and `helm install` fails with "no matches for kind PodMonitoring".
+  podMonitoring:
+    enabled: false
+    interval: 30s
+
+  # Prometheus-operator's ServiceMonitor, for the local kind stack.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+# ---------------------------------------------------------------------------
+# Fault injection - the failure lab drives these. ALL DEFAULT OFF.
+# See failure-lab/ . Never set any of these in a values file you deploy for
+# real; they are meant to be passed with --set for a scenario, then removed.
+# ---------------------------------------------------------------------------
+faultInjection:
+  crashOnStart: false
+  failReadiness: false
+  failLiveness: false
+  startupDelaySeconds: 0
+  errorRatePercent: 0
+  latencyInjectMs: 0
+  memoryBallastMb: 0
+  cpuBurn: false
+
+# Extra labels/annotations applied to every object the chart creates.
+commonLabels: {}
+commonAnnotations: {}

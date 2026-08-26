@@ -1,0 +1,25 @@
+{
+  "displayName": "orders-api - pods restarting",
+  "documentation": {
+    "content": "CONTAINERS ARE RESTARTING.\n\nAlert on restart RATE, not on total count - a total count alerts forever after one historical restart, and gets muted.\n\nFirst command:\n  kubectl get pods -n orders\n  kubectl describe pod POD -n orders | grep -A6 'Last State'\n\nRead the exit code:\n  137  = SIGKILL. OOMKilled, or grace period expired -> TROUBLESHOOTING.md section 4\n  143  = SIGTERM. Liveness probe failure or eviction  -> TROUBLESHOOTING.md section 6\n  other = the application chose to exit             -> TROUBLESHOOTING.md section 3\n\nCAVEAT: a supervisor or ASGI server can rewrite the application's exit code.\nOnly 137 and 143 (which originate outside the process) are fully reliable.\n\nThen:\n  kubectl logs POD -n orders --previous    <-- the crash reason is HERE\n\nCapture evidence before fixing - a second restart overwrites --previous logs:\n  ./scripts/collect-logs.sh -n orders",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "more than 2 restarts in 10 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"kubernetes.io/container/restart_count\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 2,
+        "duration": "600s",
+        "aggregations": [
+          { "alignmentPeriod": "600s", "perSeriesAligner": "ALIGN_DELTA", "crossSeriesReducer": "REDUCE_SUM", "groupByFields": ["resource.label.pod_name"] }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "alertStrategy": { "autoClose": "1800s" },
+  "severity": "WARNING",
+  "enabled": true
+}

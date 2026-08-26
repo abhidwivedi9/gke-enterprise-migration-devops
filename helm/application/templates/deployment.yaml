@@ -1,0 +1,267 @@
+{{- include "orders-api.validateImage" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orders-api.fullname" . }}
+  labels:
+    {{- include "orders-api.labels" . | nindent 4 }}
+  annotations:
+    # Surfaced by `kubectl rollout history` as the CHANGE-CAUSE column. Without
+    # it, rollout history is a list of revision numbers with no meaning, which
+    # is useless at 02:00 when you need to know which revision to roll back to.
+    kubernetes.io/change-cause: "helm {{ .Release.IsUpgrade | ternary "upgrade" "install" }} to appVersion {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}, revision {{ .Release.Revision }})"
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # Omitted entirely when the HPA is enabled. If both the Deployment and the
+  # HPA set replicas, they fight: Helm resets it to 2, the HPA scales it back
+  # to 5, and every `helm upgrade` causes a scale-down blip. Letting the field
+  # be absent is what stops that.
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+
+  # How many old ReplicaSets to keep. Each retained ReplicaSet is one rollback
+  # target: `kubectl rollout undo --to-revision` cannot go further back than
+  # this. 10 is the default and is a sensible balance.
+  revisionHistoryLimit: 10
+
+  # Fail the rollout instead of hanging forever if pods never become available.
+  # Without it, `kubectl rollout status` blocks indefinitely on a broken deploy
+  # and your pipeline hangs rather than failing fast.
+  progressDeadlineSeconds: 600
+
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml .Values.strategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+
+  selector:
+    matchLabels:
+      {{- include "orders-api.selectorLabels" . | nindent 6 }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "orders-api.labels" . | nindent 8 }}
+      annotations:
+        # THE CONFIG-CHANGE ROLLOUT TRIGGER.
+        #
+        # Editing a ConfigMap does NOT restart pods. Without this checksum, a
+        # config change appears to deploy successfully while every pod keeps
+        # serving the old value - a genuinely nasty class of incident because
+        # everything reports healthy. Hashing the rendered ConfigMap into a pod
+        # annotation changes the pod template, which forces a rolling update.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.secrets.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.monitoring.serviceMonitor.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.targetPort | quote }}
+        prometheus.io/path: "/metrics"
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orders-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # Must exceed preStop sleep + app drain + longest in-flight request, or
+      # Kubernetes SIGKILLs mid-request and users see 502s on every deploy.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "orders-api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          env:
+            # Downward API: the pod learns its own identity. This is what makes
+            # /version able to answer "which pod served me" and what makes the
+            # structured logs correlatable back to a specific pod.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+            {{- /* Fault injection. Rendered only when non-default, so a normal
+                   deploy produces a clean, minimal pod spec. */}}
+            {{- if .Values.faultInjection.crashOnStart }}
+            - name: CRASH_ON_START
+              value: "true"
+            {{- end }}
+            {{- if .Values.faultInjection.failReadiness }}
+            - name: FAIL_READINESS
+              value: "true"
+            {{- end }}
+            {{- if .Values.faultInjection.failLiveness }}
+            - name: FAIL_LIVENESS
+              value: "true"
+            {{- end }}
+            {{- if gt (int .Values.faultInjection.startupDelaySeconds) 0 }}
+            - name: STARTUP_DELAY_SECONDS
+              value: {{ .Values.faultInjection.startupDelaySeconds | quote }}
+            {{- end }}
+            {{- if gt (int .Values.faultInjection.errorRatePercent) 0 }}
+            - name: ERROR_RATE_PERCENT
+              value: {{ .Values.faultInjection.errorRatePercent | quote }}
+            {{- end }}
+            {{- if gt (int .Values.faultInjection.latencyInjectMs) 0 }}
+            - name: LATENCY_INJECT_MS
+              value: {{ .Values.faultInjection.latencyInjectMs | quote }}
+            {{- end }}
+            {{- if gt (int .Values.faultInjection.memoryBallastMb) 0 }}
+            - name: MEMORY_BALLAST_MB
+              value: {{ .Values.faultInjection.memoryBallastMb | quote }}
+            {{- end }}
+            {{- if .Values.faultInjection.cpuBurn }}
+            - name: CPU_BURN
+              value: "true"
+            {{- end }}
+
+          envFrom:
+            # Non-secret configuration.
+            - configMapRef:
+                name: {{ include "orders-api.fullname" . }}-config
+            {{- if or .Values.secrets.create .Values.secrets.existingSecret }}
+            # Secrets. optional: true so the pod is not blocked from scheduling
+            # when the Secret is absent - it starts, fails its own config check,
+            # and tells you exactly which key is missing in the logs. That is a
+            # far better failure mode than a pod stuck in CreateContainerConfigError
+            # with no application-level explanation.
+            - secretRef:
+                name: {{ .Values.secrets.create | ternary (printf "%s-secrets" (include "orders-api.fullname" .)) .Values.secrets.existingSecret }}
+                optional: true
+            {{- end }}
+
+          {{- if .Values.probes.startup.enabled }}
+          # While the startup probe is failing, liveness and readiness are
+          # SUSPENDED. Total boot budget = periodSeconds x failureThreshold.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          {{- end }}
+
+          {{- if .Values.probes.liveness.enabled }}
+          # Restarts the container on failure. Keep it forgiving.
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+          {{- end }}
+
+          {{- if .Values.probes.readiness.enabled }}
+          # Removes the pod from Service Endpoints on failure. Keep it twitchy.
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            successThreshold: {{ .Values.probes.readiness.successThreshold }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+          {{- end }}
+
+          lifecycle:
+            preStop:
+              # THE 502-DURING-DEPLOY FIX.
+              #
+              # Pod deletion does two things CONCURRENTLY, not in order:
+              #   (a) kubelet starts terminating the container
+              #   (b) the endpoints controller removes the pod from the Service
+              # (b) propagates through kube-proxy/iptables on every node and is
+              # not instantaneous. Without this sleep, the container can be gone
+              # while nodes are still routing to it - which users see as 502s.
+              #
+              # Sleeping here does nothing except give (b) time to finish.
+              exec:
+                command: ["sleep", "5"]
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          {{- if .Values.containerSecurityContext.readOnlyRootFilesystem }}
+          # readOnlyRootFilesystem: true means the container cannot write
+          # anywhere - including /tmp, which many libraries assume exists and is
+          # writable. An emptyDir gives it a writable /tmp that vanishes with
+          # the pod, keeping the rest of the filesystem immutable.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+
+      {{- if .Values.containerSecurityContext.readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- end }}
+
+      {{- if .Values.topologySpreadConstraints.enabled }}
+      # Spread replicas across nodes so one node failure is not a total outage.
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ .Values.topologySpreadConstraints.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "orders-api.selectorLabels" . | nindent 14 }}
+      {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

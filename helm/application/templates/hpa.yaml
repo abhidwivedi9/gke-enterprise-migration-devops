@@ -1,0 +1,52 @@
+{{- if .Values.autoscaling.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "orders-api.fullname" . }}
+  labels:
+    {{- include "orders-api.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "orders-api.fullname" . }}
+
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  # The hard ceiling on how many pods - and therefore how much money - this
+  # workload can consume. Combined with the node pool's max_node_count in
+  # Terraform, these two numbers bound your worst-case spend.
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+
+  metrics:
+    {{- if gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 0 }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Utilization is a PERCENTAGE OF THE CPU REQUEST, not of the limit and
+          # not of the node. With requests.cpu=50m and target 70%, the HPA aims
+          # to keep average usage near 35m per pod.
+          #
+          # If resources.requests.cpu is unset, the HPA cannot compute this at
+          # all and reports <unknown>/70%. That plus a missing metrics-server
+          # are the two causes of nearly every "my HPA will not scale" ticket.
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if gt (int .Values.autoscaling.targetMemoryUtilizationPercentage) 0 }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          # Scaling on memory is usually a trap: most processes do not RELEASE
+          # memory when load drops, so the HPA scales up and never back down.
+          # Enable only when you know the workload's memory tracks load.
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

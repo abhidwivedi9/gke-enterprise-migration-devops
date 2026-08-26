@@ -1,0 +1,24 @@
+{
+  "displayName": "GKE - node not ready",
+  "documentation": {
+    "content": "A NODE IS NOT READY.\n\nImpact: every pod on that node is unreachable or being rescheduled. Capacity has silently dropped.\n\nFirst command:\n  kubectl get nodes\n  kubectl describe node NODE | grep -A10 Conditions\n\nRead the conditions:\n  MemoryPressure=True  -> node is out of memory, pods are being evicted\n  DiskPressure=True    -> disk full, image pulls will start failing\n  Ready=Unknown        -> the kubelet stopped reporting (crash or network partition)\n\nIf you are running SPOT VMs (this project's default), the most likely cause is\nPREEMPTION. Google reclaimed the node with 30 seconds notice. That is the trade\nyou accepted for the 60-91% discount, and it is why minReplicas is 2 and there\nis a topology spread constraint.\n\nGKE node auto-repair handles most of this automatically. If it does not:\n  kubectl cordon NODE\n  kubectl drain NODE --ignore-daemonsets --delete-emptydir-data\n\nIf the drain HANGS, check PodDisruptionBudgets:\n  kubectl get pdb -A        <-- ALLOWED DISRUPTIONS: 0 is the culprit",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "node Ready condition false for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"kubernetes.io/node/status/condition\" resource.type=\"k8s_node\" metric.label.\"condition\"=\"Ready\" metric.label.\"status\"=\"false\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "300s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN", "crossSeriesReducer": "REDUCE_SUM" }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "CRITICAL",
+  "enabled": true
+}

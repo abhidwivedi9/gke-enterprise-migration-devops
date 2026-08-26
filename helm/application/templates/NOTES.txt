@@ -1,0 +1,109 @@
+========================================================================
+{{ .Chart.Name }} — release {{ .Release.Name }} (revision {{ .Release.Revision }})
+========================================================================
+
+WHAT WAS DEPLOYED
+  Chart version    : {{ .Chart.Version }}
+  App version      : {{ .Chart.AppVersion }}
+  Image            : {{ include "orders-api.image" . }}
+  Namespace        : {{ .Release.Namespace }}
+{{- if .Values.image.digest }}
+  Pinned by DIGEST — this deployment is byte-for-byte deterministic.
+{{- else }}
+  Pinned by TAG. Deterministic only if the registry enforces immutable tags
+  (Terraform sets immutable_tags = true on the Artifact Registry repo).
+{{- end }}
+
+------------------------------------------------------------------------
+STEP 1 — Did the rollout actually finish?
+
+  kubectl rollout status deployment/{{ include "orders-api.fullname" . }} \
+    -n {{ .Release.Namespace }} --timeout=180s
+
+  "helm install" returning 0 means the MANIFESTS were accepted, not that the
+  pods are running. Without --wait, Helm does not check. This is the number
+  one reason a pipeline reports SUCCESS on a deploy that never came up.
+
+------------------------------------------------------------------------
+STEP 2 — Are the pods healthy?
+
+  kubectl get pods -n {{ .Release.Namespace }} \
+    -l app.kubernetes.io/instance={{ .Release.Name }} -o wide
+
+  Look for READY 1/1 and RESTARTS 0. READY 0/1 with STATUS Running means the
+  readiness probe is failing — the container is up but serving nothing.
+
+------------------------------------------------------------------------
+STEP 3 — VERIFY THE VERSION. Never skip this.
+
+  kubectl get pods -n {{ .Release.Namespace }} \
+    -l app.kubernetes.io/instance={{ .Release.Name }} \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+
+  Then ask the running process itself, which is the only real ground truth:
+
+  kubectl port-forward -n {{ .Release.Namespace }} \
+    svc/{{ include "orders-api.fullname" . }} 8080:{{ .Values.service.port }} &
+  curl -s localhost:8080/version
+
+  Expect application_version = {{ .Chart.AppVersion }}.
+  If it does not match, STOP and read docs/VERSION_VERIFICATION.md.
+
+  Or run the whole chain in one command:
+    ./scripts/verify-version.sh -n {{ .Release.Namespace }} -r {{ .Release.Name }} -v {{ .Chart.AppVersion }}
+
+------------------------------------------------------------------------
+STEP 4 — Reach the service (no cost, no load balancer)
+
+  kubectl port-forward -n {{ .Release.Namespace }} \
+    svc/{{ include "orders-api.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s localhost:8080/api/orders | jq
+
+{{- if .Values.autoscaling.enabled }}
+
+------------------------------------------------------------------------
+AUTOSCALING is on: {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} replicas, target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% of the CPU request.
+
+  kubectl get hpa {{ include "orders-api.fullname" . }} -n {{ .Release.Namespace }} -w
+
+  TARGETS showing <unknown>/{{ .Values.autoscaling.targetCPUUtilizationPercentage }}% means the HPA cannot read metrics.
+  Check metrics-server is running, and that resources.requests.cpu is set.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+------------------------------------------------------------------------
+!! COST WARNING !!
+Ingress is ENABLED. On GKE this provisions a Cloud HTTP(S) Load Balancer at
+roughly $18/month, billed even at zero traffic. Disable it when you are done:
+  helm upgrade {{ .Release.Name }} ... --set ingress.enabled=false
+{{- end }}
+
+{{- if .Values.secrets.create }}
+
+------------------------------------------------------------------------
+!! SECURITY WARNING !!
+secrets.create=true — a chart-managed Secret. The value is stored in the Helm
+release and recoverable via `helm get values`. Development only.
+See SECURITY.md for the Secret Manager approach.
+{{- end }}
+
+{{- $fi := .Values.faultInjection }}
+{{- if or $fi.crashOnStart $fi.failReadiness $fi.failLiveness $fi.cpuBurn (gt (int $fi.errorRatePercent) 0) (gt (int $fi.latencyInjectMs) 0) (gt (int $fi.memoryBallastMb) 0) (gt (int $fi.startupDelaySeconds) 0) }}
+
+------------------------------------------------------------------------
+!! FAULT INJECTION IS ACTIVE !!
+This release is deliberately broken for a failure-lab scenario. It is NOT a
+healthy deployment. Reset it with:
+  ./failure-lab/reset.sh {{ .Release.Name }} {{ .Release.Namespace }}
+------------------------------------------------------------------------
+{{- end }}
+
+------------------------------------------------------------------------
+ROLLBACK, if this release is bad
+
+  helm history {{ .Release.Name }} -n {{ .Release.Namespace }}
+  helm rollback {{ .Release.Name }} <REVISION> -n {{ .Release.Namespace }} --wait
+
+  Full procedure, including what to check afterwards: ROLLBACK_RUNBOOK.md
+========================================================================

@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# Credentials and secrets. Nothing in this block may ever be committed - this
+# repository is public. See SECURITY.md for the full pre-publication checklist.
+# ---------------------------------------------------------------------------
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+service-account.json
+service-account*.json
+*-sa-key.json
+gcp-credentials*.json
+credentials.json
+client_secret*.json
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+*-secret.yaml
+!*-secret.example.yaml
+kubeconfig
+kubeconfig-*
+.kube/
+
+# ---------------------------------------------------------------------------
+# Terraform. State files contain resource attributes and can contain secrets in
+# plaintext; they belong in a remote backend, never in git.
+# ---------------------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Helm
+helm/**/charts/
+*.tgz
+
+# Tooling / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# Local scratch output from scripts/collect-logs.sh
+logs-bundle-*/
+*.log

@@ -1,0 +1,24 @@
+{
+  "displayName": "orders-api - sustained high CPU",
+  "documentation": {
+    "content": "CPU IS SUSTAINED ABOVE THE HPA TARGET.\n\nThis is only a problem if the HPA is NOT responding. If replicas are climbing, the system is working as designed and this alert is informational.\n\nFirst command:\n  kubectl get hpa orders-api -n orders\n\nIf TARGETS shows <unknown>: the HPA is blind and will never scale.\n  kubectl top pods -n orders\n    - top FAILS  -> metrics-server is down\n    - top WORKS  -> resources.requests.cpu is unset (no denominator)\n  See docs/AUTOSCALING.md\n\nIf the HPA is at maxReplicas: you are out of headroom. Either raise the ceiling\n(costs money) or find out why each pod needs so much CPU.\n\nIf new pods are Pending: cluster capacity is the constraint, not the HPA.\n\nNOTE: CPU is compressible. Exceeding the limit throttles rather than kills, so\nthe user-visible symptom is LATENCY, not errors - until upstream timeouts turn\nit into 5xx.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "CPU above 80% of request for 10 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"kubernetes.io/container/cpu/request_utilization\" resource.type=\"k8s_container\" resource.label.\"namespace_name\"=\"orders\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.8,
+        "duration": "600s",
+        "aggregations": [
+          { "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN", "crossSeriesReducer": "REDUCE_MEAN" }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "severity": "WARNING",
+  "enabled": true
+}

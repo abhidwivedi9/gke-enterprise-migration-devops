@@ -1,0 +1,134 @@
+name: Terraform
+
+# Plan on every PR, apply only on manual dispatch.
+#
+# APPLY IS DELIBERATELY NOT AUTOMATIC. This stack creates billable GKE
+# resources; an auto-apply on merge is how a learning project produces a
+# surprise invoice. A human reads the plan and decides.
+
+on:
+  pull_request:
+    paths: ['terraform/**']
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'plan or apply'
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false   # never interrupt an apply mid-flight
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write        # to post the plan as a PR comment
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform/environments/dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Format check
+        run: terraform fmt -check -recursive ../..
+
+      # Validate needs no credentials, so it still runs on a fork PR.
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      # Everything below needs GCP and is skipped on forks, where secrets are
+      # not available.
+      - name: Authenticate to Google Cloud
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_SERVICE_ACCOUNT }}
+
+      - name: Plan
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'workflow_dispatch'
+        id: plan
+        env:
+          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_github_repository: ${{ github.repository }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+          echo "summary=$(grep -E '^Plan:' plan.txt || echo 'No changes')" >> "$GITHUB_OUTPUT"
+
+      - name: Comment the plan on the PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/environments/dev/plan.txt', 'utf8');
+            // Trim: GitHub rejects comments over 65536 characters.
+            const body = [
+              '### Terraform plan',
+              '',
+              '> Review the COST implications before approving. Look specifically for',
+              '> `google_container_node_pool`, `google_compute_router_nat` and any',
+              '> forwarding rule - those are the resources that bill hourly.',
+              '',
+              '```terraform',
+              plan.length > 60000 ? plan.slice(0, 60000) + '\n... truncated ...' : plan,
+              '```'
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  apply:
+    name: Apply
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    # Attach required reviewers to this environment in repo settings. That is
+    # what turns "anyone can create a GKE cluster" into "someone approved it".
+    environment: dev-infra
+    defaults:
+      run:
+        working-directory: terraform/environments/dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_SERVICE_ACCOUNT }}
+
+      - name: Apply
+        env:
+          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_github_repository: ${{ github.repository }}
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
+
+      - name: Cost reminder
+        run: |
+          {
+            echo "## Infrastructure applied"
+            echo ""
+            echo "**Billing has started.** A GKE node pool bills by the hour whether"
+            echo "or not any traffic reaches it."
+            echo ""
+            echo "Tear it down when you are done:"
+            echo '```bash'
+            echo './scripts/destroy-gcp.sh'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
