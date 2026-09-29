@@ -114,7 +114,13 @@ env_value() {
 assert_scenario() {
   case "$1" in
     01) wait_for "CrashLoopBackOff or restarts" 150 'has_waiting_reason CrashLoopBackOff || has_restarts' ;;
-    02) wait_for "ImagePullBackOff/ErrImagePull" 120 'has_waiting_reason ImagePullBackOff || has_waiting_reason ErrImagePull' ;;
+    # On a REAL registry the tag is genuinely absent, so the kubelet tries a
+    # pull, fails, and backs off with ImagePullBackOff. On kind, this chart
+    # sets pullPolicy: Never (there is no registry to pull from - see
+    # values-local.yaml), so the kubelet never attempts a pull at all and
+    # reports ErrImageNeverPull instead. Both are correct for their platform.
+    02) wait_for "ImagePullBackOff/ErrImagePull/ErrImageNeverPull" 120 \
+          'has_waiting_reason ImagePullBackOff || has_waiting_reason ErrImagePull || has_waiting_reason ErrImageNeverPull' ;;
     03) wait_for "a Pending pod" 120 'has_pending_pod' ;;
     04) wait_for "OOMKilled (exit 137)" 240 'has_terminated_reason OOMKilled || has_restarts' ;;
     05) wait_for "Running but NOT Ready" 150 'has_running_not_ready' ;;

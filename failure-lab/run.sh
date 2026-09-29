@@ -90,7 +90,15 @@ require_release() {
 }
 
 helm_set() {
-  helm upgrade "$RELEASE" "$CHART" "${VALUES[@]}" -n "$NAMESPACE" --reuse-values "$@"
+  # --force-conflicts: Helm 4 applies via Server-Side Apply by default, so any
+  # field a raw `kubectl` command has ever touched on this object (kubectl set
+  # image, kubectl annotate, kubectl patch - several scenarios below use these
+  # deliberately) is now owned by a different field manager, and a plain
+  # `helm upgrade` is REJECTED as a conflict rather than applied. The lab
+  # exists to inject faults via kubectl AND Helm side by side, so Helm must be
+  # told to reclaim ownership every time, or every scenario after the first
+  # kubectl mutation silently stops applying its fault.
+  helm upgrade "$RELEASE" "$CHART" "${VALUES[@]}" -n "$NAMESPACE" --reuse-values --force-conflicts "$@"
 }
 
 banner() {

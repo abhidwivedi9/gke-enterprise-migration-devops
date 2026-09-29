@@ -108,6 +108,12 @@ fix takes up to 5 minutes to visibly take effect.
 Pods stay `Pending`/`ContainerCreating`, then flip to `ErrImagePull` and settle
 into `ImagePullBackOff`. Zero restarts, because no container ever started.
 
+> **On kind specifically**, running this scenario produces `ErrImageNeverPull`
+> instead — because `values-local.yaml` sets `pullPolicy: Never` (there is no
+> registry to pull from locally), so the kubelet never attempts a pull at all.
+> The real-world causes below are identical either way; only the exact reason
+> string differs by platform.
+
 **COMMAND**
 ```bash
 kubectl describe pod <POD> -n orders | tail -15
