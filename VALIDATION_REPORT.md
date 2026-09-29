@@ -25,10 +25,12 @@ command actually produced, or is explicitly marked as unverified.
 | Kubernetes manifests | ✅ 4/4 passed |
 | Shell tooling | ✅ 2/2 passed (5 warnings found and fixed) |
 | Live cluster behaviour | ✅ 9/9 passed (3 real bugs found and fixed) |
+| Failure lab | ✅ **15/15 scenarios reproduce, automated regression** (2 more bugs found and fixed) |
 | Security & secret hygiene | ✅ 4/4 passed |
-| **GKE / GCP runtime** | ⚠️ **0 tested — requires a billable account** |
+| Cost tooling, live against a real GCP account | ✅ verified (2 more bugs found and fixed) |
+| **GKE / GCP runtime (this repo's Terraform)** | ⚠️ **not yet applied — see below** |
 
-**Nine defects were found by running things.** Every one is listed below with
+**Twelve defects were found by running things.** Every one is listed below with
 its fix. That count is the most useful number in this document: it's the
 difference between code that was written and code that was executed.
 
@@ -134,14 +136,18 @@ Two healthy pods, both probes returning 200, and 28% of users getting errors.
 That's the entire argument for alerting on 5xx rate rather than pod health,
 demonstrated rather than asserted.
 
-**Failure-lab scenarios exercised:**
+**Failure-lab scenarios — all 15, verified by an automated regression suite**
+([`failure-lab/run-all.sh`](failure-lab/run-all.sh)): inject, assert the
+documented symptom actually appears, reset, assert the cluster is healthy
+again.
 
-| Scenario | Reproduced | Notes |
-|---|---|---|
-| 01 CrashLoopBackOff | ✅ | `RESTARTS 2 (11s ago)`, cause visible only in `--previous` logs |
-| 14 Service has no endpoints | ✅ | `ENDPOINTS <none>` with both pods `1/1 Running` |
-| 15 Bad release → rollback | ✅ | numbers above |
-| 02–13 | ⚠️ written, not individually executed | 01/14/15 cover the three distinct mechanisms (helm `--set`, `kubectl patch`, Service mutation); reset verified |
+```
+passed: 15   failed: 0   skipped: 0   (2m 21s)
+```
+
+Getting to 15/15 took two rounds and found two real defects — recorded here
+because a regression suite that only ever reports green is worth less than
+one with a visible history of having caught something.
 
 > **Defect 7 — found by running scenario 01.** The write-up documented exit code
 > **1** (what the application passes to `sys.exit`). The container actually
@@ -167,6 +173,50 @@ demonstrated rather than asserted.
 > failure while old pods drained — and a pod wedged in `Terminating` made it
 > permanent. Terminating pods are now excluded from the fleet check and reported
 > separately as a warning.
+
+> **Defect 10 — found by the first full failure-lab regression run: 7 of 15
+> scenarios (02, 04, 05, 06, 07, 08, 15) did not reproduce their documented
+> symptom.**
+>
+> Root cause for six of them (04–08, 15): Helm v4 applies via **Server-Side
+> Apply** by default. Earlier manual `kubectl` commands against this same
+> Deployment (`kubectl set image`, `kubectl annotate`, both run during the
+> verify-version debugging above) had transferred ownership of specific
+> fields — `.metadata.annotations`, `.spec.template...image` — to different
+> field managers. Every subsequent `helm upgrade --reuse-values` in the lab's
+> `helm_set()` helper was then **silently rejected as a conflict**: not
+> applied, and not erroring loudly enough to notice without checking. Fixed
+> with `--force-conflicts` — the lab deliberately mixes kubectl-level and
+> Helm-level fault injection, so Helm has to be told to reclaim ownership on
+> every upgrade.
+>
+> Scenario 02 was a second, unrelated bug: on kind, `values-local.yaml` sets
+> `pullPolicy: Never` (no registry to pull from locally), so a nonexistent tag
+> produces `ErrImageNeverPull`, not `ImagePullBackOff`/`ErrImagePull`. Both the
+> assertion and the README now document all three reasons, split by platform.
+>
+> Re-run after both fixes, full suite: **15/15 PASS in 2m21s.**
+
+> **Defect 11 — `cost-check.sh` could hang forever with no error.**
+> `gcloud sql instances list` (and any `gcloud … list` against an API never
+> touched on the project) prints an interactive *"enable this API? (y/N)"*
+> prompt. With no TTY to answer it, the process blocked indefinitely — worse
+> than an error, because it looked identical to "still checking." Found live,
+> running the script against a real project after billing was reactivated.
+> `CLOUDSDK_CORE_DISABLE_PROMPTS=1` does **not** cover this specific prompt
+> (confirmed by isolating each `gcloud` call individually); the actual fix is
+> closing the script's stdin once at the top (`exec </dev/null`), which every
+> subsequent `gcloud` call inherits.
+
+> **Defect 12 — not a code defect, a real-money finding.** Once the GCP
+> billing account was reactivated, an unrelated GKE cluster from June (5 node
+> pools, autoscaling enabled up to 1000 nodes each) plus one load balancer
+> (~₹1,728/month billed at zero traffic) turned out to be alive on the same
+> project and resumed billing the instant the account reopened. Neither was
+> created by this project's Terraform. Found by `cost-check.sh` immediately
+> after reactivation, confirmed with the user, and deleted. This is the
+> concrete case for why `cost-check.sh` exists and why it should run after
+> every billing-account state change, not just after `terraform apply`.
 
 **Final state after both fixes:**
 ```
@@ -325,8 +375,10 @@ docker run --rm -v "$(pwd):/repo" zricethezav/gitleaks:latest detect --source=/r
 ## The honest summary
 
 Everything that could be verified without a cloud account **was** verified, on a
-real 3-node Kubernetes cluster, and the process found nine defects — including
-two in the version-verification script that is this project's centrepiece.
+real 3-node Kubernetes cluster, and the process found twelve defects —
+including two in the version-verification script that is this project's
+centrepiece, two in the failure-lab regression itself, and two in the cost
+tooling built to keep the real GCP account safe.
 
 The GKE-specific paths are reviewed and schema-valid. **They have not been run.**
 This document exists so that distinction is never ambiguous.
