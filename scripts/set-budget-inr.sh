@@ -16,6 +16,12 @@
 
 set -uo pipefail
 
+# See cost-check.sh for why: an un-suppressed "enable this API? (y/N)" prompt
+# blocks forever with no TTY to answer it, rather than failing fast. Closing
+# stdin is the fix that actually works for this specific prompt.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+exec </dev/null
+
 AMOUNT_INR=500
 BILLING_ACCOUNT=""
 NAME="gke-lab-inr-budget"

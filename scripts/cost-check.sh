@@ -18,6 +18,18 @@
 
 set -uo pipefail
 
+# Force every gcloud call to be non-interactive. Without this, a `list` call
+# against an API that has never been touched on a project (e.g. Cloud SQL,
+# never enabled) prints "Would you like to enable and retry? (y/N)?" and
+# BLOCKS FOREVER waiting for a keypress this script has no way to supply -
+# which is exactly what happened the first time this ran against a real
+# project. CLOUDSDK_CORE_DISABLE_PROMPTS does NOT cover this particular
+# prompt (confirmed by testing it in isolation); closing stdin does, and
+# closing it once here means every gcloud call below inherits it, rather
+# than needing `</dev/null` annotated on each one individually.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+exec </dev/null
+
 # Approximate, for a sanity-check estimate only - GCP bills your account
 # directly in its own set currency (INR, per this account), so the real
 # number is always the one in the Billing console, not this script.
