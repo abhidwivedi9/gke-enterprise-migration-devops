@@ -6,7 +6,7 @@ it teaches. If a change wouldn't pass review at work, it doesn't belong here.
 ## Setup
 
 ```bash
-git clone https://github.com/OWNER/gke-enterprise-migration-devops
+git clone https://github.com/abhidwivedi9/gke-enterprise-migration-devops
 cd gke-enterprise-migration-devops
 
 pip install -r app/requirements-dev.txt

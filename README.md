@@ -10,7 +10,7 @@ version verification that catches the deploys nobody notices are wrong, a
 15-scenario failure lab, and runbooks written to be opened during an incident
 rather than read on a Sunday.
 
-[![Build and Test](https://github.com/OWNER/gke-enterprise-migration-devops/actions/workflows/build-test.yml/badge.svg)](../../actions)
+[![Build and Test](https://github.com/abhidwivedi9/gke-enterprise-migration-devops/actions/workflows/build-test.yml/badge.svg)](../../actions)
 &nbsp;·&nbsp; License: Apache-2.0
 &nbsp;·&nbsp; Cost at rest: **$0** (local) · ~**$5–7/month** (GKE, defaults)
 

@@ -21,7 +21,7 @@ authorized_networks = [
 
 # owner/repo of YOUR fork. If this is wrong, the OIDC trust condition is wrong
 # and either CI cannot authenticate or the wrong repo can.
-github_repository = "your-github-username/gke-enterprise-migration-devops"
+github_repository = "abhidwivedi9/gke-enterprise-migration-devops"
 
 # ---------------------------------------------------------------------------
 # Cost flags. Each of these costs money. Leave false unless you have read
