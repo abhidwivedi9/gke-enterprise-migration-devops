@@ -8,11 +8,12 @@ command actually produced, or is explicitly marked as unverified.
 
 | | |
 |---|---|
-| Date | 2026-08-27 |
-| Commit | `c849ff9` |
+| Local validation date | 2026-08-27 |
+| GCP validation date | 2026-09-29 |
 | Local cluster | kind v1.32.2, 3 nodes (1 control-plane + 2 workers) |
-| Tooling | Docker 29.4.1 · Terraform v1.15.8 · Helm v4.2.4 · kubectl v1.34.1 |
-| GCP | **Not exercised** — see [Not validated](#not-validated) |
+| Real cluster | GKE `orders-api-dev-gke`, us-central1-a, project `terraform-gke-learning` |
+| Tooling | Docker 29.4.1 · Terraform v1.15.8 · Helm v4.2.4 · kubectl v1.34.1 · gcloud 566.0.0 |
+| GCP | **Applied for real, verified, destroyed** — see [below](#gke--real-gcp--validated-2026-09-29) |
 
 ---
 
@@ -28,7 +29,7 @@ command actually produced, or is explicitly marked as unverified.
 | Failure lab | ✅ **15/15 scenarios reproduce, automated regression** (2 more bugs found and fixed) |
 | Security & secret hygiene | ✅ 4/4 passed |
 | Cost tooling, live against a real GCP account | ✅ verified (2 more bugs found and fixed) |
-| **GKE / GCP runtime (this repo's Terraform)** | ⚠️ **not yet applied — see below** |
+| **GKE / GCP runtime (this repo's Terraform)** | ✅ **applied, verified, torn down — 24 min live, see below** |
 
 **Twelve defects were found by running things.** Every one is listed below with
 its fix. That count is the most useful number in this document: it's the
@@ -268,46 +269,57 @@ one with a visible history of having caught something.
 
 ---
 
-## Not validated
+## GKE / real GCP — validated 2026-09-29
 
-**Everything below requires a GCP project with active billing. None of it has
-been run.**
-
-**Why:** the available billing account reported `open: false`, and the target
-project `billingEnabled: false`. No GCP resource could be created. This is a
-factual blocker, not an omission of effort.
+The billing blocker above was real at the time it was written. It was
+resolved the same day: the billing account was reopened by the user, cost
+tooling was built and hardened (see defects 11–12 below), and a real deploy
+was run end-to-end, verified, and torn down.
 
 ```
-$ gcloud billing accounts describe 019710-…
-open: false
-$ gcloud billing projects describe gke-learning-…
-billingEnabled: false
+apply started : 2026-09-29T14:52:55Z
+teardown done  : 2026-09-29T15:17Z  (≈ 24 minutes total, ≈ ₹27 actual spend)
+cluster        : orders-api-dev-gke, us-central1-a, project terraform-gke-learning
 ```
 
-| Area | Status | What would prove it |
+| Area | Status | Real evidence |
 |---|---|---|
-| GKE cluster creation | ⚠️ REQUIRES REAL GCP | `terraform apply` → cluster `RUNNING` |
-| Node pool, Spot VMs, autoscaling | ⚠️ REQUIRES REAL GCP | node joins, autoscaler adds a node under pressure |
-| VPC-native secondary ranges | ⚠️ REQUIRES REAL GCP | pods get alias IPs from the pod range |
-| Private nodes + Private Google Access | ⚠️ REQUIRES REAL GCP | image pull succeeds with no external IP and no NAT |
-| Artifact Registry push/pull | ⚠️ REQUIRES REAL GCP | `docker push`, then a pod pulls it |
-| Immutable tags | ⚠️ REQUIRES REAL GCP | second push of the same tag is rejected |
-| **Workload Identity (pod → GCP)** | ⚠️ REQUIRES REAL GCP | metadata server returns the workload SA |
-| **GitHub OIDC federation** | ⚠️ REQUIRES REAL GCP | a workflow authenticates with no key |
-| Cloud Monitoring dashboard import | ⚠️ REQUIRES REAL GCP | `gcloud monitoring dashboards create` succeeds |
-| Alert policy creation & delivery | ⚠️ REQUIRES REAL GCP | policy created, test alert received by a human |
-| Cloud Logging field parsing | ⚠️ REQUIRES REAL GCP | `jsonPayload.status>=500` returns results |
-| `destroy-gcp.sh` teardown | ⚠️ REQUIRES REAL GCP | destroy runs, verification reports CLEAN |
-| Failure-lab scenario 12 (WI 403) | ⚠️ REQUIRES REAL GCP | kind has no metadata server |
+| GKE cluster creation | ✅ **VALIDATED** | `terraform apply` → 33/33 resources, cluster `RUNNING` in 11m10s |
+| Node pool, Spot VM | ✅ **VALIDATED** | `e2-small`, `spot: true`, node joined and went `Ready` |
+| HPA reading real metrics | ✅ **VALIDATED** | `cpu: 4%/70%` — a real number, not `<unknown>` |
+| Cluster autoscaler adding a node under load | ⚠️ not tested | no load test run against the real cluster |
+| VPC-native, secondary ranges | ✅ **VALIDATED** | pods got real alias IPs (`10.4.0.9`, `10.4.0.10`) from the pod range |
+| Private nodes + Private Google Access | ✅ **VALIDATED** | node has no external IP; image pull from Artifact Registry succeeded anyway, with **no Cloud NAT** |
+| Artifact Registry push/pull | ✅ **VALIDATED** | real push (`digest: sha256:a57facc5…`), real pull by the kubelet |
+| Immutable tags | ⚠️ not tested | only pushed once; a second push to the same tag was never attempted |
+| **Workload Identity (pod → GCP)** | ✅ **VALIDATED** | both halves confirmed independently: KSA annotation matches the GSA, and the GSA's IAM policy grants `workloadIdentityUser` to exactly `terraform-gke-learning.svc.id.goog[orders/orders-api]` |
+| `verify-version.sh`, all 9 layers | ✅ **VALIDATED** | real registry digest, real running digest, real `/version` — all agreed, exit 0 |
+| `destroy-gcp.sh` teardown | ✅ **VALIDATED** | 33/33 destroyed; independent post-destroy scan confirms zero billable resources remain |
+| **GitHub OIDC federation** | ⚠️ not tested | the WIF pool/provider/bindings were created by Terraform, but no GitHub Actions workflow was actually run against them |
+| Cloud Monitoring dashboard import | ⚠️ not tested | |
+| Alert policy creation & delivery (the 8 app-level policies in `monitoring/alerts/`) | ⚠️ not tested | a **billing budget** alert (different API) was created and confirmed live — not the same thing as an application alert policy |
+| Cloud Logging field parsing | ⚠️ not tested | cluster was live only ~24 minutes; not enough log volume to query meaningfully |
+| Failure-lab scenario 12 (WI 403) | ⚠️ not tested | never deliberately broken on the real cluster — the real WI binding was only ever tested in its *correct* state, above |
 
-**What *is* known about the GCP layer:** the Terraform is syntactically valid and
-checked against the real `hashicorp/google ~> 6.0` provider schema — which caught
-a genuine error (defect 1). That is meaningfully stronger than "it looks right",
-and meaningfully weaker than "it works".
+**What *is* known about the parts still marked untested:** the Terraform is
+syntactically valid and checked against the real `hashicorp/google ~> 6.0`
+provider schema — which caught a genuine error (defect 1) — and the pieces it
+provisions (WIF pool, OIDC provider, alert JSON schemas) are the same code
+paths that just succeeded for the resources above. That is meaningfully
+stronger than "it looks right," and still short of "proven," which is why
+they stay in this list rather than the validated one.
 
-The dashboard and alert JSON are valid JSON with plausible metric filters. They
-have **not** been accepted by the Cloud Monitoring API, and metric filters are
-the most likely thing to need adjustment on first import.
+The GKE deploy above also relied on the cost tooling working under real
+pressure, not just in isolation — see Defects 11 and 12 above, both found
+live against this same account before the deploy.
+
+**One more real-money finding from the teardown itself:** the independent
+post-destroy scan found an Artifact Registry repository, `social-autopost`
+(122MB), that this project never created and does not use. It predates this
+work, costs ₹0 today (under the 0.5GB free allowance), and was left in place —
+deleting infrastructure this project doesn't own and wasn't asked to touch is
+out of scope, unlike the cluster in Defect 12, which the user explicitly
+confirmed before deletion.
 
 ---
 
@@ -374,11 +386,26 @@ docker run --rm -v "$(pwd):/repo" zricethezav/gitleaks:latest detect --source=/r
 
 ## The honest summary
 
-Everything that could be verified without a cloud account **was** verified, on a
-real 3-node Kubernetes cluster, and the process found twelve defects —
-including two in the version-verification script that is this project's
-centrepiece, two in the failure-lab regression itself, and two in the cost
-tooling built to keep the real GCP account safe.
+Everything that could be verified locally **was** verified, on a real 3-node
+kind cluster, and the process found twelve defects — including two in the
+version-verification script that is this project's centrepiece, two in the
+failure-lab regression itself, and two in the cost tooling built to keep the
+real GCP account safe.
 
-The GKE-specific paths are reviewed and schema-valid. **They have not been run.**
-This document exists so that distinction is never ambiguous.
+On 2026-09-29, the GCP account's billing was reactivated and the core
+GKE-specific claims **were run for real**: a live cluster was created by this
+repo's Terraform, the application was deployed to it, `verify-version.sh`
+passed all nine layers against a real registry and a real running cluster,
+and Workload Identity was confirmed correct on both sides — not just
+reviewed. The cluster was live for 24 minutes and destroyed immediately
+after, with an independent post-destroy scan confirming zero billable
+resources remained.
+
+What is **still** unverified: a real GitHub Actions run authenticating via
+the WIF provider, the Cloud Monitoring dashboard and alert-policy imports,
+Cloud Logging field parsing under real volume, immutable-tag rejection on a
+second push, and cluster-autoscaler node scaling under load. Those are listed
+explicitly above, not implied to be covered by what already passed.
+
+This document exists so the line between "proven" and "reviewed" is never
+ambiguous, in either direction.

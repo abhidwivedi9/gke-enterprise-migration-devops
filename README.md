@@ -201,12 +201,13 @@ Every claim is recorded in **[VALIDATION_REPORT.md](VALIDATION_REPORT.md)**.
 
 | | |
 |---|---|
-| ✅ **Verified on a real cluster** | Docker build, container smoke test, 12/12 unit tests, ruff, bandit, `terraform validate`, `helm lint`/`template`, 3-node kind deploy, HPA scaling with live metrics, failure-lab scenarios, a real bad-release → rollback → recovery cycle |
-| ⚠️ **Not verified — requires a billable GCP account** | GKE cluster creation, Artifact Registry push/pull, Workload Identity, GitHub OIDC federation, Cloud Monitoring dashboard import |
+| ✅ **Verified on a local kind cluster** | Docker build, container smoke test, 12/12 unit tests, ruff, bandit, `terraform validate`, `helm lint`/`template`, HPA scaling with live metrics, all 15 failure-lab scenarios (automated regression), a real bad-release → rollback → recovery cycle |
+| ✅ **Verified on a real GKE cluster** (2026-09-29, live 24 minutes, then destroyed) | `terraform apply` → 33/33 resources; real image push/pull through Artifact Registry; `verify-version.sh` passed all 9 layers against the real cluster; **Workload Identity confirmed on both sides** (KSA annotation ↔ GSA IAM binding); HPA reading real metrics; `destroy-gcp.sh` → independently confirmed zero billable resources remain |
+| ⚠️ **Still not verified** | A GitHub Actions workflow actually authenticating via the WIF provider; Cloud Monitoring dashboard/alert-policy import; Cloud Logging field parsing under real volume; immutable-tag rejection; cluster-autoscaler node scaling under load |
 
-Nothing in this repository claims a GCP deployment succeeded. The Terraform is
-schema-valid and reviewed; it has not been applied against a live billing
-account.
+The full account of what ran, when, and what it found — including two real
+defects the GCP run itself surfaced — is in
+[VALIDATION_REPORT.md](VALIDATION_REPORT.md#gke--real-gcp--validated-2026-09-29).
 
 ---
 
