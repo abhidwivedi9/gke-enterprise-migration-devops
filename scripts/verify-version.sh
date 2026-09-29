@@ -210,17 +210,32 @@ fi
 # imageID tells the truth.
 # ---------------------------------------------------------------------------
 step "Pods: reconcile requested image vs the digest actually running"
+# .metadata.deletionTimestamp is emitted as the 5th field: a pod that has one is
+# TERMINATING. Those are being torn down and must NOT count toward the
+# mixed-fleet check - otherwise every successful rollout reports a false
+# "2 different digests" failure for as long as the old pods take to drain, and a
+# pod wedged in Terminating makes that failure permanent. (Both happened here.)
+#
+# They are still listed, because a terminating pod does briefly serve traffic -
+# that is the entire reason the preStop hook exists.
 PODS="$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE}" \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.containers[0].image}{"|"}{.status.containerStatuses[0].imageID}{"|"}{.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+  -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.containers[0].image}{"|"}{.status.containerStatuses[0].imageID}{"|"}{.status.phase}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null || true)"
 
 if [[ -z "$PODS" ]]; then
   fail "no pods found with label app.kubernetes.io/instance=${RELEASE}"
 else
   UNIQUE_DIGESTS=0
   SEEN_DIGESTS=""
-  while IFS='|' read -r pod image imageid phase; do
+  TERMINATING=0
+  while IFS='|' read -r pod image imageid phase deletion; do
     [[ -z "$pod" ]] && continue
     short_id="${imageid##*@}"
+    if [[ -n "$deletion" ]]; then
+      TERMINATING=$((TERMINATING+1))
+      info "$pod  [Terminating - excluded from the fleet check]"
+      info "    running: ${short_id:-<not started>}"
+      continue
+    fi
     info "$pod  [$phase]"
     info "    spec  : $image"
     info "    running: ${short_id:-<not started>}"
@@ -229,6 +244,9 @@ else
       UNIQUE_DIGESTS=$((UNIQUE_DIGESTS+1))
     fi
   done <<< "$PODS"
+
+  [[ "$TERMINATING" -gt 0 ]] && \
+    warn "$TERMINATING pod(s) still Terminating - normal right after a rollout, a problem if it persists"
 
   if [[ "$UNIQUE_DIGESTS" -gt 1 ]]; then
     fail "$UNIQUE_DIGESTS DIFFERENT image digests are running simultaneously"
@@ -288,10 +306,34 @@ else
     info "Every layer above can be green while this is wrong. This is the one that counts."
   fi
 
+  # COMMIT MISMATCH IS A FAILURE, NOT A WARNING.
+  #
+  # This was a real bug in this script. The version string can match while the
+  # commit does not, and that combination IS the mutable-tag scenario: the tag
+  # was rebuilt and repointed, `helm upgrade` produced an identical pod template
+  # so no rollout happened, and the pods kept running the previous digest.
+  #
+  # Reporting that as a warning while the headline still said "VERIFIED" made
+  # the script contradict its own evidence - which is precisely the failure mode
+  # the script exists to catch.
+  #
+  # Only compared when BOTH sides are known: an image built outside a git
+  # checkout legitimately reports "unknown", and a clean tree at a different
+  # commit is a separate (warned) condition handled in step 1.
   if [[ "${GIT_COMMIT:-unknown}" != "unknown" && -n "$RUNNING_COMMIT" && "$RUNNING_COMMIT" != "unknown" ]]; then
-    [[ "$RUNNING_COMMIT" == "$GIT_COMMIT" ]] \
-      && pass "running commit matches local HEAD" \
-      || warn "running commit ${RUNNING_COMMIT:0:12} != local HEAD ${GIT_COMMIT:0:12}"
+    if [[ "$RUNNING_COMMIT" == "$GIT_COMMIT" ]]; then
+      pass "running commit matches local HEAD"
+    else
+      fail "running commit ${RUNNING_COMMIT:0:12} != local HEAD ${GIT_COMMIT:0:12}"
+      info "The version string matches but the CODE does not. Usual cause: the tag"
+      info "was rebuilt and repointed, so the pod template never changed and no"
+      info "rollout happened. Force one, or deploy by digest:"
+      info "  kubectl rollout restart deployment/${RELEASE} -n ${NAMESPACE}"
+    fi
+  elif [[ "${RUNNING_COMMIT:-unknown}" == "unknown" || -z "$RUNNING_COMMIT" ]]; then
+    warn "the running image reports no git commit - it was built without --build-arg GIT_COMMIT"
+    info "Version verification is weaker without it: you can confirm the version"
+    info "string but not the code behind it."
   fi
 
   # Sample several times: with a partial rollout, different requests land on
