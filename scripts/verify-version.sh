@@ -270,9 +270,14 @@ else
   RESTARTS="$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE}" \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[0].restartCount}{"\n"}{end}' 2>/dev/null \
     | awk '{s+=$1} END {print s+0}')"
+  # NOTE: backticks inside a double-quoted string trigger command
+  # substitution in bash, not literal display. The original version of this
+  # line ran `kubectl logs --previous` for real - with no pod name, which
+  # kubectl rejects - and leaked that raw error into the output instead of
+  # showing the intended advice. Single quotes avoid the trap.
   [[ "$RESTARTS" -eq 0 ]] \
     && pass "0 restarts across all pods" \
-    || warn "$RESTARTS restarts total — check `kubectl logs --previous`"
+    || warn "$RESTARTS restarts total — check 'kubectl logs POD -n $NAMESPACE --previous'"
 fi
 
 # ---------------------------------------------------------------------------
